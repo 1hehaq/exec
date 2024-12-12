@@ -95,15 +95,41 @@ jobs:
           
           # Use multiple tools for URL discovery
           cat ${{ env.OUTPUT_DIR }}/urls/live_domains.txt | while read domain; do
-            # Historical URLs
-            gau --subs $domain >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt
+            # Historical URLs using gau
+            echo "Fetching URLs for $domain using gau..."
+            gau --subs $domain >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt || true
             
-            # Crawl for URLs
-            katana -u $domain -d 5 -jc -ef css,png,jpg,gif >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt
+            # Crawl using katana with error handling
+            echo "Crawling $domain using katana..."
+            katana -u "https://$domain" -d 5 -jc -ef css,png,jpg,gif -nc -timeout 20 -retry 2 >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt || true
+            katana -u "http://$domain" -d 5 -jc -ef css,png,jpg,gif -nc -timeout 20 -retry 2 >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt || true
+            
+            # Fallback to waybackurls if both fail
+            if [ ! -s "${{ env.OUTPUT_DIR }}/urls/raw_urls.txt" ]; then
+              echo "Falling back to waybackurls for $domain..."
+              echo "$domain" | waybackurls >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt || true
+            fi
           done
           
+          # Ensure we have some URLs before proceeding
+          if [ ! -s "${{ env.OUTPUT_DIR }}/urls/raw_urls.txt" ]; then
+            echo "No URLs found. Creating minimal URL list..."
+            for domain in $(cat ${{ env.OUTPUT_DIR }}/urls/live_domains.txt); do
+              echo "https://$domain" >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt
+              echo "http://$domain" >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt
+            done
+          fi
+          
           # Filter potential SSRF endpoints
-          cat ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt | grep -iE "url=|redirect=|path=|src=|dest=|uri=|link=|location=|file=|reference=|site=|html=|data=|page=|feed=|host=|port=|to=|out=|view=|dir=|show=|navigation=|open=|next=|callback=|return=|load=|continue=|fetch=|download=|upload=|proxy=|target=" > ${{ env.OUTPUT_DIR }}/urls/potential_ssrf.txt
+          echo "Filtering potential SSRF endpoints..."
+          cat ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt | sort -u | \
+            grep -iE "url=|redirect=|path=|src=|dest=|uri=|link=|location=|file=|reference=|site=|html=|data=|page=|feed=|host=|port=|to=|out=|view=|dir=|show=|navigation=|open=|next=|callback=|return=|load=|continue=|fetch=|download=|upload=|proxy=|target=" > ${{ env.OUTPUT_DIR }}/urls/potential_ssrf.txt || true
+          
+          # Ensure we have at least some endpoints to test
+          if [ ! -s "${{ env.OUTPUT_DIR }}/urls/potential_ssrf.txt" ]; then
+            echo "No potential SSRF endpoints found. Using all URLs..."
+            cat ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt > ${{ env.OUTPUT_DIR }}/urls/potential_ssrf.txt
+          fi
 
       - name: SSRF Testing
         run: |
