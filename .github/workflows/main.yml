@@ -1,4 +1,4 @@
-name: Automated run
+name: Automated XSS Hunter
 
 on:
   schedule:
@@ -106,13 +106,13 @@ jobs:
             qsreplace "'><svg/onload=confirm(1)>" | \
             while read url; do
               XSS-Checker \
-                --url "$url" \
+                --endpoint "$url" \
                 --threads 10 \
                 --timeout 15 \
                 --browser Chrome \
                 --sig "XSS_FOUND" \
                 --writefile "${{ env.OUTPUT_DIR }}/results/basic_xss.txt" \
-                --silent
+                --silent || true
             done
           
           # Advanced XSS Testing with Dalfox
