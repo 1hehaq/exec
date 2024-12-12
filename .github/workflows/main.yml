@@ -116,6 +116,12 @@ jobs:
             --follow-redirects \
             --output ${{ env.OUTPUT_DIR }}/results/dalfox_results.txt
 
+      - name: Upload Scan Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: xss-scan-results
+          path: ${{ env.OUTPUT_DIR }}/results/
+
       - name: Send Results
         if: always()
         run: |
