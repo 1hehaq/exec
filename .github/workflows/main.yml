@@ -1,4 +1,4 @@
-name: Auto run
+name: Automated run
 
 on:
   schedule:
@@ -44,15 +44,23 @@ jobs:
 
       - name: Setup Chrome for XSS Testing
         run: |
+          # Install Chrome
           wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt install ./google-chrome-stable_current_amd64.deb
-          CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d'.' -f1)
-          wget https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}
-          CHROMEDRIVER_VERSION=$(cat LATEST_RELEASE_${CHROME_VERSION})
-          wget https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip
+          
+          # Get the latest ChromeDriver version
+          CHROME_VERSION=$(google-chrome --version | cut -d ' ' -f 3)
+          CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE")
+          
+          # Download and setup ChromeDriver
+          wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip"
           unzip chromedriver_linux64.zip
           sudo mv chromedriver /usr/local/bin/
           sudo chmod +x /usr/local/bin/chromedriver
+          
+          # Verify installations
+          google-chrome --version
+          chromedriver --version
 
       - name: Select Random Target
         id: target
