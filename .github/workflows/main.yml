@@ -2,7 +2,7 @@ name: Automated XSS Hunter
 
 on:
   schedule:
-    - cron: '0 */12 * * *'  # Runs every 12 hours
+    - cron: '0 */7 * * *'  # Runs every 7 hours
   workflow_dispatch:  # Allows manual triggering
 
 env:
