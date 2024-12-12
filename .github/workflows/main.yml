@@ -1,4 +1,4 @@
-name: Automated XSS Hunter
+name: Auto run
 
 on:
   schedule:
@@ -41,7 +41,6 @@ jobs:
           # Install Python tools
           pip3 install --upgrade pip
           pip3 install XSS-Checker
-          pip3 install bxss
 
       - name: Setup Chrome for XSS Testing
         run: |
@@ -92,7 +91,9 @@ jobs:
 
       - name: XSS Scanning
         run: |
-          # Basic XSS Detection
+          mkdir -p ${{ env.OUTPUT_DIR }}/results
+          
+          # Basic XSS Detection with XSS-Checker
           cat ${{ env.OUTPUT_DIR }}/urls/parameterized_urls.txt | \
             qsreplace "'><svg/onload=confirm(1)>" | \
             while read url; do
@@ -114,13 +115,17 @@ jobs:
             --skip-bav \
             --skip-mining-dom \
             --follow-redirects \
-            --output ${{ env.OUTPUT_DIR }}/results/dalfox_results.txt
+            --output ${{ env.OUTPUT_DIR }}/results/dalfox_results.txt \
+            --format json
 
       - name: Upload Scan Results
         uses: actions/upload-artifact@v3
         with:
           name: xss-scan-results
-          path: ${{ env.OUTPUT_DIR }}/results/
+          path: |
+            ${{ env.OUTPUT_DIR }}/results/
+            ${{ env.OUTPUT_DIR }}/urls/
+            ${{ env.OUTPUT_DIR }}/subdomains/
 
       - name: Send Results
         if: always()
@@ -131,7 +136,6 @@ jobs:
           TOTAL_VULNS=$((BASIC_XSS_COUNT + DALFOX_COUNT))
           
           if [ "$TOTAL_VULNS" -gt 0 ]; then
-            # Send completion notification with vuln count
             COMPLETE_MSG="✅ XSS Scan Complete%0A%0ATarget: ${{ steps.target.outputs.target }}%0ATime: $(date '+%Y-%m-%d %H:%M:%S UTC')%0AVulnerabilities Found: $TOTAL_VULNS"
             curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
               -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
