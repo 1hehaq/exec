@@ -1,0 +1,134 @@
+name: Android Security Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_name:
+        description: 'Name of the target app'
+        required: false
+      apk_url:
+        description: 'Direct URL to APK'
+        required: false
+  schedule:
+    - cron: '0 */7 * * *'  # Run every 7 hours
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      # Fetch target if not manually specified
+      - name: Get Target from Bugcrowd
+        if: github.event.inputs.target_name == ''
+        run: |
+          pip3 install requests beautifulsoup4
+          cat > fetch_target.py << 'EOF'
+          import requests
+          from bs4 import BeautifulSoup
+          import json
+          
+          def get_android_targets():
+              url = "https://bugcrowd.com/programs"
+              headers = {"User-Agent": "Mozilla/5.0"}
+              response = requests.get(url, headers=headers)
+              soup = BeautifulSoup(response.text, 'html.parser')
+              
+              programs = []
+              for program in soup.find_all('div', class_='program-card'):
+                  if 'Android' in str(program):
+                      name = program.find('h4').text.strip()
+                      programs.append({
+                          'name': name,
+                          'url': f"https://play.google.com/store/apps/details?id={name.lower().replace(' ', '.')}"
+                      })
+              
+              return programs[0] if programs else None
+          
+          target = get_android_targets()
+          if target:
+              with open('target.json', 'w') as f:
+                  json.dump(target, f)
+          EOF
+          
+          python3 fetch_target.py
+          if [ -f target.json ]; then
+            echo "TARGET_NAME=$(jq -r .name target.json)" >> $GITHUB_ENV
+            echo "TARGET_URL=$(jq -r .url target.json)" >> $GITHUB_ENV
+          fi
+
+      - name: Set Manual Target
+        if: github.event.inputs.target_name != ''
+        run: |
+          echo "TARGET_NAME=${{ github.event.inputs.target_name }}" >> $GITHUB_ENV
+          echo "TARGET_URL=${{ github.event.inputs.apk_url }}" >> $GITHUB_ENV
+
+      # Setup terminal access
+      - name: Setup Tmate Session
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmate openssh-client
+          
+          ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
+          
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          
+          # Hide sensitive output
+          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          
+          MSG="🔐 SSH Access Details%0A%0A"
+          MSG+="SSH Command: \`$SSH_CMD\`%0A"
+          MSG+="Web URL: $WEB_URL%0A"
+          MSG+="Note: Session will remain active for 6 hours"
+          
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$MSG" \
+            -d "parse_mode=MarkdownV2" > /dev/null 2>&1
+
+      # Download APK
+      - name: Download Target APK
+        run: |
+          mkdir -p apks
+          wget -O "apks/${TARGET_NAME// /_}.apk" "$TARGET_URL" || true
+
+      # MobSF Analysis
+      - name: Run MobSF Static Analysis
+        run: |
+          START_TIME=$(date +"%Y-%m-%d %H:%M:%S")
+          
+          docker pull opensecurity/mobile-security-framework-mobsf:latest
+          docker run -d -p 8000:8000 opensecurity/mobile-security-framework-mobsf:latest
+          sleep 30
+          
+          # MobSF uses '236f11ccea4831637e4d0d3c2c1f1b36' as default API key
+          find apks -name "*.apk" -type f | while read apk; do
+            curl -F "file=@$apk" http://localhost:8000/api/v1/upload \
+              -H "Authorization:236f11ccea4831637e4d0d3c2c1f1b36" > mobsf_response.json 2>/dev/null
+          done
+          
+          END_TIME=$(date +"%Y-%m-%d %H:%M:%S")
+          
+          MSG="🔍 Scan Completed%0A%0A"
+          MSG+="Target: $TARGET_NAME%0A"
+          MSG+="Start Time: $START_TIME%0A"
+          MSG+="End Time: $END_TIME%0A"
+          MSG+="Results are available in artifacts"
+          
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$MSG" > /dev/null 2>&1
+
+      # Upload raw results
+      - name: Upload Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-scan-results-${{ env.TARGET_NAME }}
+          path: |
+            mobsf_response.json
+            target.json
+
+      - name: Keep Alive
+        run: sleep 6h
