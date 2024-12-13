@@ -1,0 +1,70 @@
+name: Copilot
+
+on:
+  schedule:
+    - cron: '0 */7 * * *'  # Runs every 7 hours
+  workflow_dispatch:  # Allows manual triggering
+
+env:
+  OUTPUT_DIR: 'bounty-results'
+  TARGETS_URL: 'https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt'
+  THREADS: 333
+
+jobs:
+  bug-hunting:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install Core Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip wget git golang-go
+
+      - name: Install and Setup WebCopilot
+        run: |
+          git clone https://github.com/h4r5h1t/webcopilot
+          cd webcopilot/
+          chmod +x webcopilot install.sh
+          sudo mv webcopilot /usr/bin/
+          sudo ./install.sh
+
+      - name: Select Random Target
+        id: target
+        run: |
+          wget -q ${{ env.TARGETS_URL }} -O wildcards.txt
+          TARGET=$(shuf -n 1 wildcards.txt | sed 's/^\*\.//')
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          
+          # Notification
+          START_MSG="🎯 Starting Bug Bounty Scan%0A%0ATarget: $TARGET%0ATime: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$START_MSG" \
+            -d "parse_mode=HTML"
+
+      - name: Run WebCopilot Scan
+        run: |
+          webcopilot -d ${{ steps.target.outputs.target }} \
+            -o ${{ env.OUTPUT_DIR }} \
+            -t ${{ env.THREADS }} \
+            -b ${{ secrets.BXSS_CALLBACK_URL }} \
+            -a
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: bug-bounty-results
+          path: ${{ env.OUTPUT_DIR }}
+
+      - name: Send Report
+        if: always()
+        run: |
+          FINDINGS=$(find ${{ env.OUTPUT_DIR }} -type f -exec wc -l {} \; | awk '{total += $1} END {print total}')
+          COMPLETE_MSG="✅ Bug Bounty Scan Complete%0A%0ATarget: ${{ steps.target.outputs.target }}%0ATotal Findings: $FINDINGS%0ATime: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$COMPLETE_MSG" \
+            -d "parse_mode=HTML"
