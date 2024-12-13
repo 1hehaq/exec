@@ -8,45 +8,81 @@ jobs:
     steps:
       - name: Setup SSH Access
         run: |
-          # Install ngrok
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null && \
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list && \
-          sudo apt update && sudo apt install ngrok
+          # Install ngrok with error checking
+          echo "Installing ngrok..."
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt update && sudo apt install -y ngrok
 
-          # Setup SSH (skip if already installed)
-          if ! dpkg -l | grep -q openssh-server; then
-            sudo apt-get install -y openssh-server
+          # Verify ngrok installation
+          if ! command -v ngrok &> /dev/null; then
+              echo "Ngrok installation failed!"
+              exit 1
           fi
+
+          # Setup SSH
+          echo "Setting up SSH..."
+          sudo apt-get install -y openssh-server
           sudo service ssh start
           
-          # Update runner password (whether user exists or not)
+          # Configure runner user
           echo "runner:${{ secrets.SSH_PASSWORD }}" | sudo chpasswd
-          sudo usermod -aG sudo runner 2>/dev/null || true
+          sudo usermod -aG sudo runner
 
           # Configure SSH
           sudo sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo service ssh restart
 
-          # Start ngrok tunnel
+          # Start ngrok tunnel with debug output
+          echo "Starting ngrok tunnel..."
           ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-          ngrok tcp 22 > ngrok.log &
-          sleep 5
-          
-          # Get public URL
-          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
-          echo "SSH Access Details:" > ssh_details.txt
-          echo "Host: $(echo $NGROK_URL | cut -d':' -f1 | cut -d'/' -f3)" >> ssh_details.txt
-          echo "Port: $(echo $NGROK_URL | cut -d':' -f3)" >> ssh_details.txt
-          echo "Username: runner" >> ssh_details.txt
-          echo "Password: [Use the password set in secrets]" >> ssh_details.txt
+          ngrok tcp 22 --log=stdout > ngrok.log &
+          sleep 10  # Give more time for ngrok to start
 
-          # Send details via Telegram
-          MSG="🔐 SSH Access Details%0A%0A$(cat ssh_details.txt | sed 's/$/\\n/g')"
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          # Debug: Check ngrok process
+          ps aux | grep ngrok
+          
+          # Debug: Check ngrok logs
+          cat ngrok.log
+          
+          # Get connection details with error checking
+          echo "Getting connection details..."
+          TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels)
+          echo "Tunnel info: $TUNNEL_INFO"
+          
+          if [ -z "$TUNNEL_INFO" ]; then
+              echo "Failed to get tunnel info!"
+              exit 1
+          fi
+          
+          HOST=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url' | cut -d'/' -f3 | cut -d':' -f1)
+          PORT=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url' | cut -d':' -f3)
+          
+          echo "Debug - Host: $HOST"
+          echo "Debug - Port: $PORT"
+          
+          if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+              echo "Failed to extract host/port!"
+              exit 1
+          fi
+          
+          # Send via Telegram with error checking
+          MSG="🔐 SSH Access Details%0A%0AHost: $HOST%0APort: $PORT%0AUsername: runner%0APassword: [Check repository secrets]"
+          TELEGRAM_RESPONSE=$(curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=$MSG" \
-            -d "parse_mode=HTML"
+            -d "parse_mode=HTML")
+            
+          echo "Telegram response: $TELEGRAM_RESPONSE"
 
       - name: Keep Alive
-        run: sleep 1h  # Keeps the runner alive for 1 hour
+        run: |
+          echo "SSH access is ready. Runner will stay alive for 6 hours."
+          sleep 6h
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          sudo pkill -f ngrok || true
+          sudo service ssh stop || true
