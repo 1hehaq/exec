@@ -1,4 +1,4 @@
-name: Automated Bug Bounty Hunter
+name: copilot
 
 on:
   schedule:
@@ -39,7 +39,6 @@ jobs:
           go install -v github.com/lc/gau/v2/cmd/gau@latest
           go install -v github.com/tomnomnom/waybackurls@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go get -v github.com/Emoe/kxss
           go install -v github.com/haccer/subjack@latest
           go install -v github.com/tomnomnom/qsreplace@latest
           go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
@@ -48,9 +47,12 @@ jobs:
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 
-          # Build and install kxss
-          cd $(go env GOPATH)/pkg/mod/github.com/!emoe/kxss@*
-          go build
+          # Install kxss in a temporary directory
+          mkdir -p /tmp/kxss && cd /tmp/kxss
+          go mod init kxss
+          go get -v github.com/Emoe/kxss
+          go mod tidy
+          go build -o kxss github.com/Emoe/kxss
           sudo mv kxss /usr/local/bin/
 
           # Add Go binaries to PATH
