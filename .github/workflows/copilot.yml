@@ -9,6 +9,8 @@ env:
   OUTPUT_DIR: 'bounty-results'
   TARGETS_URL: 'https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt'
   THREADS: 333
+  GO111MODULE: on
+  GOPATH: /home/runner/go
 
 jobs:
   bug-hunting:
@@ -17,10 +19,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
       - name: Install Core Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip wget git golang-go
+          sudo apt-get install -y python3-pip wget git golang-go chromium-browser
+
+      - name: Install Go Tools
+        run: |
+          # Install required Go tools
+          go install -v github.com/tomnomnom/anew@latest
+          go install -v github.com/tomnomnom/gf@latest
+          go install -v github.com/OWASP/Amass/v3/...@latest
+          go install -v github.com/tomnomnom/assetfinder@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest
+          go install -v github.com/tomnomnom/waybackurls@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install -v github.com/tomnomnom/kxss@latest
+          go install -v github.com/haccer/subjack@latest
+          go install -v github.com/tomnomnom/qsreplace@latest
+          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+          go install -v github.com/hahwul/dalfox/v2@latest
+          go install -v github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+
+          # Add Go binaries to PATH
+          echo "${GOPATH}/bin" >> $GITHUB_PATH
 
       - name: Install and Setup WebCopilot
         run: |
