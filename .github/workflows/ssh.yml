@@ -8,30 +8,35 @@ jobs:
     steps:
       - name: Setup Tmate Session
         run: |
+          # Install tmate
           sudo apt-get update
           sudo apt-get install -y tmate openssh-client
           
+          # Generate SSH key
           ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
           
+          # Start tmate
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           
+          # Get connection strings
           SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
           
-          echo "SSH Access Details:" > ssh_details.txt
-          echo "SSH Command: \`$SSH_CMD\`" >> ssh_details.txt
-          echo "Web URL: $WEB_URL" >> ssh_details.txt
-          echo "Note: Session will remain active for 1 hour" >> ssh_details.txt
-          
+          # Escape special characters for MarkdownV2
+          ESCAPED_SSH_CMD=$(echo "$SSH_CMD" | sed -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/_/\\_/g' -e 's/`/\\`/g')
+          ESCAPED_WEB_URL=$(echo "$WEB_URL" | sed -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/_/\\_/g')
+
+          # Format for Telegram
           MSG="🔐 SSH Access Details%0A%0A"
-          MSG+="SSH Command: %60$SSH_CMD%60%0A"
-          MSG+="Web URL: $WEB_URL%0A%0A"
+          MSG+="SSH Command: \`$ESCAPED_SSH_CMD\`%0A"  # Properly escaped backticks
+          MSG+="Web URL: $ESCAPED_WEB_URL%0A%0A"
           MSG+="Note: Session will remain active for 1 hour"
 
+          # Send via Telegram
           curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=$MSG" \
-            -d "parse_mode=MarkdownV2"  # Use MarkdownV2 for proper formatting
+            -d "parse_mode=MarkdownV2"
       - name: Keep Alive
         run: sleep 1h  # Keeps the runner alive for 1 hour
