@@ -25,7 +25,7 @@ jobs:
           
           # Create details file
           echo "SSH Access Details:" > ssh_details.txt
-          echo "SSH Command: $SSH_CMD" >> ssh_details.txt
+          echo "SSH Command: \`$SSH_CMD\`%0A" >> ssh_details.txt
           echo "Web URL: $WEB_URL" >> ssh_details.txt
           echo "Note: Session will remain active for 1 hour" >> ssh_details.txt
 
