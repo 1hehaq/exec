@@ -6,43 +6,36 @@ jobs:
   ssh-access:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup SSH Access
+      - name: Setup Tmate Session
         run: |
-          # Install ngrok
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null && \
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list && \
-          sudo apt update && sudo apt install ngrok
+          # Install tmate
+          sudo apt-get update
+          sudo apt-get install -y tmate openssh-client
 
-          # Setup SSH (skip if already installed)
-          if ! dpkg -l | grep -q openssh-server; then
-            sudo apt-get install -y openssh-server
-          fi
-          sudo service ssh start
+          # Generate SSH key
+          ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
           
-          # Update runner password (whether user exists or not)
-          echo "runner:${{ secrets.SSH_PASSWORD }}" | sudo chpasswd
-          sudo usermod -aG sudo runner 2>/dev/null || true
-
-          # Configure SSH
-          sudo sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sudo service ssh restart
-
-          # Start ngrok tunnel
-          ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-          ngrok tcp 22 > ngrok.log &
-          sleep 5
+          # Start tmate
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
           
-          # Get public URL
-          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          # Get connection strings
+          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          
+          # Create details file
           echo "SSH Access Details:" > ssh_details.txt
-          echo "Host: $(echo $NGROK_URL | cut -d':' -f1 | cut -d'/' -f3)" >> ssh_details.txt
-          echo "Port: $(echo $NGROK_URL | cut -d':' -f3)" >> ssh_details.txt
-          echo "Username: runner" >> ssh_details.txt
-          echo "Password: [Use the password set in secrets]" >> ssh_details.txt
+          echo "SSH Command: $SSH_CMD" >> ssh_details.txt
+          echo "Web URL: $WEB_URL" >> ssh_details.txt
+          echo "Note: Session will remain active for 1 hour" >> ssh_details.txt
 
-          # Send details via Telegram
-          MSG="🔐 SSH Access Details%0A%0A$(cat ssh_details.txt | sed 's/$/\\n/g')"
+          # Format for Telegram
+          MSG="🔐 SSH Access Details%0A%0A"
+          MSG+="SSH Command: $SSH_CMD%0A"
+          MSG+="Web URL: $WEB_URL%0A%0A"
+          MSG+="Note: Session will remain active for 1 hour"
+
+          # Send via Telegram
           curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=$MSG" \
