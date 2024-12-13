@@ -13,18 +13,19 @@ jobs:
           echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list && \
           sudo apt update && sudo apt install ngrok
 
-          # Setup SSH
-          sudo apt-get install -y openssh-server
+          # Setup SSH (skip if already installed)
+          if ! dpkg -l | grep -q openssh-server; then
+            sudo apt-get install -y openssh-server
+          fi
           sudo service ssh start
           
-          # Create user and set password
-          sudo useradd -m -s /bin/bash runner
+          # Update runner password (whether user exists or not)
           echo "runner:${{ secrets.SSH_PASSWORD }}" | sudo chpasswd
-          sudo usermod -aG sudo runner
+          sudo usermod -aG sudo runner 2>/dev/null || true
 
           # Configure SSH
-          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo service ssh restart
 
           # Start ngrok tunnel
