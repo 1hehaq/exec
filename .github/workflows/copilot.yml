@@ -1,4 +1,4 @@
-name: Copilot
+name: Automated Bug Bounty Hunter
 
 on:
   schedule:
@@ -39,7 +39,7 @@ jobs:
           go install -v github.com/lc/gau/v2/cmd/gau@latest
           go install -v github.com/tomnomnom/waybackurls@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/tomnomnom/kxss@latest
+          go get -v github.com/Emoe/kxss
           go install -v github.com/haccer/subjack@latest
           go install -v github.com/tomnomnom/qsreplace@latest
           go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
@@ -48,8 +48,14 @@ jobs:
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 
+          # Build and install kxss
+          cd $(go env GOPATH)/pkg/mod/github.com/!emoe/kxss@*
+          go build
+          sudo mv kxss /usr/local/bin/
+
           # Add Go binaries to PATH
           echo "${GOPATH}/bin" >> $GITHUB_PATH
+          echo "/usr/local/bin" >> $GITHUB_PATH
 
       - name: Install and Setup WebCopilot
         run: |
