@@ -6,34 +6,73 @@ jobs:
   ssh-access:
     runs-on: ubuntu-latest
     steps:
-      - name: Install GUI and VNC Server
+      - name: Prepare System and Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xfce4 xfce4-terminal tightvncserver novnc websockify
+          sudo apt-get install -y \
+            xfce4 \
+            xfce4-terminal \
+            tightvncserver \
+            novnc \
+            websockify \
+            jq \
+            curl
+
+      - name: Setup VNC Server
+        run: |
           mkdir -p ~/.vnc
           echo "password" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
-          tightvncserver :1
-          novnc --listen 6080 --vnc localhost:5901 &
-      - name: Setup Tmate Session
+
+          cat > ~/.vnc/xstartup << EOL
+          #!/bin/sh
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          startxfce4 &
+          EOL
+          chmod +x ~/.vnc/xstartup
+
+          vncserver :1 -geometry 1280x720 -depth 24
+
+      - name: Setup noVNC and Websockify
+        run: |
+          /usr/share/novnc/utils/launch.sh --listen 6080 --vnc localhost:5901 &
+
+      - name: Setup SSH and Tmate
+        id: tmate-setup
         run: |
           sudo apt-get update
           sudo apt-get install -y tmate openssh-client
+
           ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
+
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
+
           SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          ESCAPED_SSH_CMD=$(echo "$SSH_CMD" | sed -e 's/[]_\\.*+?(){}^$|/[]/\\&/g')
-          ESCAPED_WEB_URL=$(echo "$WEB_URL" | sed -e 's/[]_\\.*+?(){}^$|/[]/\\&/g')
-          MSG="🔐 SSH Access Details%0A%0A"
-          MSG+="SSH Command: \`$ESCAPED_SSH_CMD\`%0A"
-          MSG+="Web URL: $ESCAPED_WEB_URL%0A%0A"
-          MSG+="Browser-based RDP: Connect to port 6080 using the SSH session%0A"
-          MSG+="Note: Session will remain active for 1 hour"
+
+          escape_markdown() {
+            echo "$1" | sed 's/[_\\.+?(){}^$|[\]]/\\&/g'
+          }
+
+          ESCAPED_SSH_CMD=$(escape_markdown "$SSH_CMD")
+          ESCAPED_WEB_URL=$(escape_markdown "$WEB_URL")
+
+          MSG="🔐 *SSH Access Details*%0A%0A"
+          MSG+="*SSH Command:* \`$ESCAPED_SSH_CMD\`%0A"
+          MSG+="*Web URL:* \`$ESCAPED_WEB_URL\`%0A%0A"
+          MSG+="*Browser-based VNC:* Connect to port 6080 using the SSH session%0A"
+          MSG+="*Note:* Session will remain active for 1 hour"
+
+          ENCODED_MSG=$(printf '%s' "$MSG" | jq -sRr @uri)
+
           curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=$MSG" \
+            -d "text=$ENCODED_MSG" \
             -d "parse_mode=MarkdownV2"
+
       - name: Keep Workflow Alive
-        run: sleep 1h
+        run: |
+          echo "Session is now active. You can connect via SSH or VNC."
+          sleep 1h
