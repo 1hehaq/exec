@@ -10,42 +10,30 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xfce4 xfce4-terminal tightvncserver novnc websockify
-
           mkdir -p ~/.vnc
-
           echo "password" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
-
           tightvncserver :1
-
           novnc --listen 6080 --vnc localhost:5901 &
-
       - name: Setup Tmate Session
         run: |
           sudo apt-get update
           sudo apt-get install -y tmate openssh-client
-
           ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
-
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-
           SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-
-          ESCAPED_SSH_CMD=$(echo "$SSH_CMD" | sed -e 's/\\/\\\\/g' -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/_/\\_/g' -e 's/`/\\`/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' -e 's/(/\\(/g' -e 's/)/\\)/g' -e 's/\~/\\~/g' -e 's/>/\\>/g' -e 's/#/\\#/g' -e 's/=/\\=/g' -e 's/!/\\!/g')
-          ESCAPED_WEB_URL=$(echo "$WEB_URL" | sed -e 's/\\/\\\\/g' -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/_/\\_/g' -e 's/`/\\`/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' -e 's/(/\\(/g' -e 's/)/\\)/g' -e 's/\~/\\~/g' -e 's/>/\\>/g' -e 's/#/\\#/g' -e 's/=/\\=/g' -e 's/!/\\!/g')
-
+          ESCAPED_SSH_CMD=$(echo "$SSH_CMD" | sed -e 's/[]_\\.*+?(){}^$|/[]/\\&/g')
+          ESCAPED_WEB_URL=$(echo "$WEB_URL" | sed -e 's/[]_\\.*+?(){}^$|/[]/\\&/g')
           MSG="🔐 SSH Access Details%0A%0A"
           MSG+="SSH Command: \`$ESCAPED_SSH_CMD\`%0A"
           MSG+="Web URL: $ESCAPED_WEB_URL%0A%0A"
           MSG+="Browser-based RDP: Connect to port 6080 using the SSH session%0A"
           MSG+="Note: Session will remain active for 1 hour"
-
           curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=$MSG" \
             -d "parse_mode=MarkdownV2"
-
       - name: Keep Workflow Alive
         run: sleep 1h
