@@ -33,11 +33,11 @@ jobs:
           SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
 
-          ESCAPED_SSH_CMD=$(echo "$SSH_CMD" | sed -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/_/\\_/g' -e 's/`/\\`/g')
-          ESCAPED_WEB_URL=$(echo "$WEB_URL" | sed -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/_/\\_/g')
+          ESCAPED_SSH_CMD=$(echo "$SSH_CMD" | sed -e 's/\\/\\\\/g' -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/_/\\_/g' -e 's/`/\\`/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' -e 's/(/\\(/g' -e 's/)/\\)/g' -e 's/\~/\\~/g' -e 's/>/\\>/g' -e 's/#/\\#/g' -e 's/=/\\=/g' -e 's/!/\\!/g')
+          ESCAPED_WEB_URL=$(echo "$WEB_URL" | sed -e 's/\\/\\\\/g' -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/_/\\_/g' -e 's/`/\\`/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' -e 's/(/\\(/g' -e 's/)/\\)/g' -e 's/\~/\\~/g' -e 's/>/\\>/g' -e 's/#/\\#/g' -e 's/=/\\=/g' -e 's/!/\\!/g')
 
           MSG="🔐 SSH Access Details%0A%0A"
-          MSG+="SSH Command: \`$ESCAPED_SSH_CMD\`%0A"  # Properly escaped backticks
+          MSG+="SSH Command: \`$ESCAPED_SSH_CMD\`%0A"
           MSG+="Web URL: $ESCAPED_WEB_URL%0A%0A"
           MSG+="Browser-based RDP: Connect to port 6080 using the SSH session%0A"
           MSG+="Note: Session will remain active for 1 hour"
