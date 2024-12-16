@@ -45,7 +45,8 @@ jobs:
             curl \
             wget \
             git \
-            jq
+            jq \
+            openssh-client
 
       - name: Install Desktop and VNC
         run: |
@@ -108,7 +109,7 @@ jobs:
         id: ssh-setup
         run: |
           # Install Tmate
-          sudo apt-get install -y tmate openssh-client
+          sudo apt-get install -y tmate
 
           # Generate SSH key
           ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa
@@ -121,20 +122,26 @@ jobs:
           SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
 
-          # Function for markdown-safe escaping
+          # Comprehensive markdown escaping function
           escape_markdown() {
-            echo "$1" | sed -e 's/[_\\.+?(){}^$|[\]]/\\&/g' -e 's/-/\\-/g'
+            local input="$1"
+            input=$(echo "$input" | sed -e 's/[_\\.+?(){}^$|[\]]/\\&/g')  # Escape special chars
+            input=$(echo "$input" | sed -e 's/\-/\\-/g')                  # Escape hyphens
+            input=$(echo "$input" | sed -e 's/\./\\./g')                  # Escape periods
+            input=$(echo "$input" | sed -e 's/!/\\!/g')                   # Escape exclamation marks
+            echo "$input"
           }
 
+          # Escape connection details
           ESCAPED_SSH_CMD=$(escape_markdown "$SSH_CMD")
           ESCAPED_WEB_URL=$(escape_markdown "$WEB_URL")
 
-          # Construct detailed message
-          MSG="🔐 *SSH & VNC Access Details*%0A%0A"
+          # Construct detailed markdown message
+          MSG="🔐 *SSH Access Details*%0A%0A"
           MSG+="*SSH Command:* \`$ESCAPED_SSH_CMD\`%0A"
           MSG+="*Web URL:* \`$ESCAPED_WEB_URL\`%0A%0A"
           MSG+="*VNC Access:*%0A"
-          MSG+="• *Web VNC:* http://localhost:$NOVNC_PORT/vnc.html%0A"
+          MSG+="• *Web VNC:* http://localhost:$NOVNC_PORT/vnc\\.html%0A"
           MSG+="• *Desktop:* ${{ github.event.inputs.desktop_environment }}%0A"
           MSG+="• *Resolution:* $VNC_GEOMETRY%0A%0A"
           MSG+="*Session Details:*%0A"
@@ -142,14 +149,21 @@ jobs:
           MSG+="• *Started:* $(date '+%Y-%m-%d %H:%M:%S')%0A%0A"
           MSG+="*Note:* Keep connection details secure\\!"
 
-          # URL encode message
+          # URL encode the message
           ENCODED_MSG=$(printf '%s' "$MSG" | jq -sRr @uri)
 
-          # Send Telegram notification
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          # Send Telegram notification with error handling
+          TELEGRAM_RESPONSE=$(curl -s -w "%{http_code}" \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=$ENCODED_MSG" \
-            -d "parse_mode=MarkdownV2"
+            -d "parse_mode=MarkdownV2")
+
+          HTTP_STATUS=$(echo "$TELEGRAM_RESPONSE" | tail -c 4)
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Telegram notification failed with status $HTTP_STATUS"
+            exit 1
+          fi
 
       - name: Keep Workflow Alive
         run: |
