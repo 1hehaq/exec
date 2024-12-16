@@ -1,72 +1,151 @@
 name: SSH Access with GUI
 
-on: workflow_dispatch
+on: 
+  workflow_dispatch:
+    inputs:
+      session_duration:
+        description: 'Session duration in minutes'
+        required: false
+        default: '60'
+      desktop_environment:
+        description: 'Desktop Environment'
+        required: false
+        default: 'xfce4'
+        type: choice
+        options:
+          - xfce4
+          - lxde
+          - mate
+
+env:
+  VNC_DISPLAY: 1
+  VNC_PORT: 5901
+  NOVNC_PORT: 6080
+  VNC_GEOMETRY: 1280x720
+  VNC_DEPTH: 24
 
 jobs:
   ssh-access:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Prepare System and Install Dependencies
+      - name: Validate Inputs
+        run: |
+          duration="${{ github.event.inputs.session_duration }}"
+          if [[ ! "$duration" =~ ^[0-9]+$ ]] || [ "$duration" -lt 10 ] || [ "$duration" -gt 120 ]; then
+            echo "Invalid session duration. Must be between 10 and 120 minutes."
+            exit 1
+          fi
+
+      - name: Install Core Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xfce4 \
-            xfce4-terminal \
+            software-properties-common \
+            curl \
+            wget \
+            git \
+            jq
+
+      - name: Install Desktop and VNC
+        run: |
+          # Install selected desktop environment
+          sudo apt-get install -y "${{ github.event.inputs.desktop_environment }}"
+          
+          sudo apt-get install -y \
             tightvncserver \
             novnc \
             websockify \
-            jq \
-            curl
+            xauth
 
-      - name: Setup VNC Server
+      - name: Setup VNC Server Configuration
         run: |
           mkdir -p ~/.vnc
-          echo "password" | vncpasswd -f > ~/.vnc/passwd
+          
+          # Create secure VNC password
+          RANDOM_PASSWORD=$(openssl rand -base64 12)
+          echo "$RANDOM_PASSWORD" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
+          # Create custom VNC startup script
           cat > ~/.vnc/xstartup << EOL
           #!/bin/sh
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
-          startxfce4 &
+          
+          case "${{ github.event.inputs.desktop_environment }}" in
+            xfce4)
+              startxfce4 &
+              ;;
+            lxde)
+              startlxde &
+              ;;
+            mate)
+              mate-session &
+              ;;
+            *)
+              echo "Unsupported desktop environment"
+              exit 1
+              ;;
+          esac
           EOL
+
           chmod +x ~/.vnc/xstartup
 
-          vncserver :1 -geometry 1280x720 -depth 24
-
-      - name: Setup noVNC and Websockify
+      - name: Start VNC and NoVNC Services
         run: |
-          /usr/share/novnc/utils/launch.sh --listen 6080 --vnc localhost:5901 &
+          # Start VNC server
+          vncserver :$VNC_DISPLAY \
+            -geometry $VNC_GEOMETRY \
+            -depth $VNC_DEPTH
 
-      - name: Setup SSH and Tmate
-        id: tmate-setup
+          # Start NoVNC
+          /usr/share/novnc/utils/launch.sh \
+            --listen $NOVNC_PORT \
+            --vnc localhost:$VNC_PORT &
+
+      - name: Setup SSH Access with Tmate
+        id: ssh-setup
         run: |
-          sudo apt-get update
+          # Install Tmate
           sudo apt-get install -y tmate openssh-client
 
-          ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
+          # Generate SSH key
+          ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa
 
+          # Start Tmate session
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
 
+          # Retrieve connection details
           SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
 
+          # Function for markdown-safe escaping
           escape_markdown() {
-            echo "$1" | sed 's/[_\\.+?(){}^$|[\]]/\\&/g'
+            echo "$1" | sed -e 's/[_\\.+?(){}^$|[\]]/\\&/g' -e 's/-/\\-/g'
           }
 
           ESCAPED_SSH_CMD=$(escape_markdown "$SSH_CMD")
           ESCAPED_WEB_URL=$(escape_markdown "$WEB_URL")
 
-          MSG="🔐 *SSH Access Details*%0A%0A"
+          # Construct detailed message
+          MSG="🔐 *SSH & VNC Access Details*%0A%0A"
           MSG+="*SSH Command:* \`$ESCAPED_SSH_CMD\`%0A"
           MSG+="*Web URL:* \`$ESCAPED_WEB_URL\`%0A%0A"
-          MSG+="*Browser-based VNC:* Connect to port 6080 using the SSH session%0A"
-          MSG+="*Note:* Session will remain active for 1 hour"
+          MSG+="*VNC Access:*%0A"
+          MSG+="• *Web VNC:* http://localhost:$NOVNC_PORT/vnc.html%0A"
+          MSG+="• *Desktop:* ${{ github.event.inputs.desktop_environment }}%0A"
+          MSG+="• *Resolution:* $VNC_GEOMETRY%0A%0A"
+          MSG+="*Session Details:*%0A"
+          MSG+="• *Duration:* ${{ github.event.inputs.session_duration }} minutes%0A"
+          MSG+="• *Started:* $(date '+%Y-%m-%d %H:%M:%S')%0A%0A"
+          MSG+="*Note:* Keep connection details secure\\!"
 
+          # URL encode message
           ENCODED_MSG=$(printf '%s' "$MSG" | jq -sRr @uri)
 
+          # Send Telegram notification
           curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d "text=$ENCODED_MSG" \
@@ -74,5 +153,13 @@ jobs:
 
       - name: Keep Workflow Alive
         run: |
-          echo "Session is now active. You can connect via SSH or VNC."
-          sleep 1h
+          echo "🕒 Session active for ${{ github.event.inputs.session_duration }} minutes"
+          sleep $((60 * ${{ github.event.inputs.session_duration }}))
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Stop VNC server
+          vncserver -kill :$VNC_DISPLAY || true
+          # Close Tmate session
+          tmate -S /tmp/tmate.sock kill-session || true
