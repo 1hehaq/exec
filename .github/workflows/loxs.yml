@@ -1,0 +1,135 @@
+name: Loxs Security Scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Select Scanner Type'
+        required: true
+        type: choice
+        options:
+          - 'LFI Scanner'
+          - 'OR Scanner'
+          - 'SQLi Scanner'
+          - 'XSS Scanner'
+          - 'CRLF Scanner'
+      
+      url_input:
+        description: 'Target URL or path to URL list file'
+        required: true
+        type: string
+      
+      payload_file:
+        description: 'Path to payload file (leave empty for default)'
+        required: false
+        type: string
+      
+      threads:
+        description: 'Number of concurrent threads (0-10, default: 5)'
+        required: false
+        type: number
+        default: 5
+      
+      scanner_config:
+        description: 'Scanner-specific configuration in JSON format (see documentation)'
+        required: false
+        type: string
+        default: '{}'
+      
+      generate_report:
+        description: 'Generate HTML report'
+        required: false
+        type: boolean
+        default: true
+      
+      report_filename:
+        description: 'HTML report filename'
+        required: false
+        type: string
+        default: 'loxs_scan_report.html'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Install Chrome and ChromeDriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests colorama rich prompt_toolkit selenium webdriver_manager beautifulsoup4 aiohttp packaging urllib3 GitPython pyyaml flask
+
+      - name: Create payload files directory
+        run: mkdir -p payloads
+
+      - name: Create default payload files
+        run: |
+          # LFI Payloads
+          echo -e "/etc/passwd\n../../etc/passwd\n../../../etc/passwd" > payloads/lfi_payloads.txt
+          
+          # OR Payloads
+          echo -e "//google.com/%2F..\n//google.com/\n//google.com" > payloads/or_payloads.txt
+          
+          # SQLi Payloads
+          echo -e "' OR '1'='1\n' OR 1=1--\n' UNION SELECT NULL--" > payloads/sqli_payloads.txt
+          
+          # XSS Payloads
+          echo -e "<script>alert(1)</script>\n<img src=x onerror=alert(1)>\n<svg onload=alert(1)>" > payloads/xss_payloads.txt
+
+      - name: Parse scanner configuration
+        id: config
+        run: |
+          echo "CONFIG=${{ github.event.inputs.scanner_config }}" >> $GITHUB_ENV
+          
+      - name: Run Loxs Scanner
+        run: |
+          # Select scanner type
+          SCANNER_NUM="${{ 
+            github.event.inputs.scan_type == 'LFI Scanner' && '1' || 
+            github.event.inputs.scan_type == 'OR Scanner' && '2' || 
+            github.event.inputs.scan_type == 'SQLi Scanner' && '3' ||
+            github.event.inputs.scan_type == 'XSS Scanner' && '4' ||
+            github.event.inputs.scan_type == 'CRLF Scanner' && '5' 
+          }}"
+          
+          # Select payload file based on scanner type
+          PAYLOAD_FILE="${{ github.event.inputs.payload_file }}"
+          if [ -z "$PAYLOAD_FILE" ]; then
+            case $SCANNER_NUM in
+              1) PAYLOAD_FILE="payloads/lfi_payloads.txt" ;;
+              2) PAYLOAD_FILE="payloads/or_payloads.txt" ;;
+              3) PAYLOAD_FILE="payloads/sqli_payloads.txt" ;;
+              4) PAYLOAD_FILE="payloads/xss_payloads.txt" ;;
+              5) PAYLOAD_FILE="payloads/lfi_payloads.txt" ;;
+            esac
+          fi
+          
+          # Run scanner
+          python loxs.py << EOF
+          $SCANNER_NUM
+          ${{ github.event.inputs.url_input }}
+          $PAYLOAD_FILE
+          ${{ github.event.inputs.threads }}
+          ${{ github.event.inputs.generate_report && 'y' || 'n' }}
+          ${{ github.event.inputs.report_filename }}
+          EOF
+
+      - name: Upload scan report
+        if: github.event.inputs.generate_report == 'true'
+        uses: actions/upload-artifact@v2
+        with:
+          name: loxs-scan-report
+          path: ${{ github.event.inputs.report_filename }}
+          if-no-files-found: error
+

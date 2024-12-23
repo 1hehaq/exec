@@ -1,0 +1,97 @@
+name: Dotfiles Fuzzer
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target URL to fuzz'
+        required: false
+      check_subdomains:
+        description: 'Enumerate subdomains'
+        type: boolean
+        default: false
+      status_codes:
+        description: 'HTTP status codes to match (comma-separated, e.g. 200,403,500)'
+        required: false
+        default: '200,301,302,403'
+  schedule:
+    - cron: '0 */3 * * *'
+
+env:
+  WORDLIST_URL: "https://raw.githubusercontent.com/Karanxa/Bug-Bounty-Wordlists/main/dotfiles.txt"
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install required tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y golang
+          go install github.com/ffuf/ffuf@latest
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          sudo mv ~/go/bin/* /usr/local/bin/
+
+      - name: Download wordlist
+        run: |
+          wget $WORDLIST_URL -O dotfiles.txt
+          
+      - name: Get targets
+        id: targets
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.target }}" ]; then
+            echo "${{ inputs.target }}" > single_target.txt
+            echo "targets=single_target.txt" >> $GITHUB_OUTPUT
+          else
+            wget https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt -O targets.txt
+            echo "targets=targets.txt" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Enumerate subdomains
+        if: inputs.check_subdomains == 'true'
+        run: |
+          subfinder -d ${{ inputs.target }} -o subdomains.txt
+          mv subdomains.txt targets.txt
+
+      - name: Fuzz dotfiles
+        run: |
+          status_codes="${{ inputs.status_codes }}"
+          if [ -z "$status_codes" ]; then
+            status_codes="200"
+          fi
+
+          while read target; do
+            echo "Fuzzing $target"
+            if curl -s -k "https://$target" >/dev/null 2>&1; then
+              ffuf -u "https://$target/FUZZ" \
+                   -w dotfiles.txt \
+                   -mc "$status_codes" \
+                   -o ffuf_output.json \
+                   -of json \
+                   -t 1 \
+                   -p 0.1 \
+                   -maxtime 300
+            else
+              ffuf -u "http://$target/FUZZ" \
+                   -w dotfiles.txt \
+                   -mc "$status_codes" \
+                   -o ffuf_output.json \
+                   -of json \
+                   -t 1 \
+                   -p 0.1 \
+                   -maxtime 300
+            fi
+            
+            if [ -f ffuf_output.json ]; then
+              findings=$(cat ffuf_output.json | jq -r '.results[] | "\(.url)"' 2>/dev/null)
+              if [ ! -z "$findings" ]; then
+                message="Found dotfiles on $target:%0A$findings"
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d "chat_id=${TELEGRAM_CHAT_ID}" \
+                  -d "text=${message}" \
+                  -d "parse_mode=HTML"
+              fi
+            fi
+          done < ${{ steps.targets.outputs.targets }}

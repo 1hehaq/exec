@@ -1,0 +1,128 @@
+name: nuclei scan
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'  # every 3 hours
+  workflow_dispatch:
+    inputs:
+      custom_target:
+        description: 'Specify a custom target (optional)'
+        required: false
+        default: ''
+      subenum:
+        description: 'Enable subdomain enumeration'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  vulnerability-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '^1.21.0'
+        cache: false
+
+    - name: Install Security Tools
+      run: |
+        go install -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
+        go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+        go install -v github.com/tomnomnom/assetfinder@latest
+        nuclei -update-templates
+
+    - name: Clone Coffin Templates
+      run: |
+        git clone https://github.com/coffinxp/nuclei-templates.git coffin-templates
+        mv coffin-templates ~/.nuclei-templates/
+        echo "Coffin templates moved into Nuclei main directory"
+
+    - name: Prepare Target
+      run: |
+        if [ -n "${{ github.event.inputs.custom_target }}" ]; then
+          TARGET="${{ github.event.inputs.custom_target }}"
+          echo "$TARGET" > targets.txt
+        else
+          curl -s https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/wildcards.txt | shuf -n 1 > targets.txt
+        fi
+
+    - name: Subdomain Enumeration
+      if: ${{ github.event.inputs.subenum != 'false' }}
+      run: |
+        cat targets.txt | subfinder -all -o subdomains.txt
+        cat targets.txt | assetfinder --subs-only >> subdomains.txt
+        sort -u subdomains.txt -o subdomains.txt
+        SUBDOMAIN_COUNT=$(wc -l < subdomains.txt)
+        echo "Subdomains found: $SUBDOMAIN_COUNT"
+
+    - name: Nuclei Vulnerability Scanning
+      run: |
+        TARGET_FILE=$([ -f subdomains.txt ] && echo "subdomains.txt" || echo "targets.txt")
+        
+        # Add rate limiting protection
+        nuclei \
+          -l $TARGET_FILE \
+          -c 50 \
+          -stats \
+          -timeout 15 \
+          -retries 3 \
+          -rl 150 \
+          -bulk-size 25 \
+          -headless-bulk-size 10 \
+          -o vulnerabilities.txt \
+          -s high,critical \
+          -es info,low,medium \
+          -t ~/.nuclei-templates/ \
+          -j \
+          -json-export nuclei-results.json \
+          -system-resolvers \
+          -silent
+          
+        VULN_COUNT=$(grep -c '"severity": "high\|"severity": "critical"' nuclei-results.json || echo 0)
+        echo "High/Critical Vulnerabilities found: $VULN_COUNT"
+
+    - name: Prepare Notification
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        TARGET=$(cat targets.txt)
+        SUBDOMAIN_COUNT=$([ -f subdomains.txt ] && wc -l < subdomains.txt || echo "0")
+        VULN_COUNT=$(grep -c '"severity": "high\|"severity": "critical"' nuclei-results.json || echo "0")
+        
+        # Escape special characters for Markdown
+        TARGET_ESCAPED=$(echo "$TARGET" | sed 's/[_*[\]()~`>#+\-=|{}.!]/\\&/g')
+        
+        MESSAGE="🚨 *Vulnerability Scan Report* 🚨%0A"
+        MESSAGE+="Target: \`$TARGET_ESCAPED\`%0A"
+        MESSAGE+="Subdomains Found: \`$SUBDOMAIN_COUNT\`%0A"
+        MESSAGE+="High/Critical Vulnerabilities: \`$VULN_COUNT\`"
+        
+        if [ -s vulnerabilities.txt ]; then
+          # Format vulnerabilities.txt content for better readability
+          sed -i 's/\[/\\\[/g; s/\]/\\\]/g' vulnerabilities.txt
+          
+          curl -F "chat_id=$TELEGRAM_CHAT_ID" \
+               -F "document=@vulnerabilities.txt" \
+               -F "caption=$MESSAGE" \
+               -F "parse_mode=MarkdownV2" \
+               "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendDocument"
+        else
+          curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+               -d "chat_id=$TELEGRAM_CHAT_ID" \
+               -d "text=$MESSAGE" \
+               -d "parse_mode=MarkdownV2"
+        fi
+
+    - name: Upload Scan Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: scan-results
+        path: |
+          vulnerabilities.txt
+          nuclei-results.json
+          subdomains.txt
